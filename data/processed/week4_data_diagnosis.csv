@@ -1,0 +1,11 @@
+﻿filename,org,language,pages,avg_tokens_per_page,median_tokens,max_tokens,images,tables,page_number_hits,repeated_short_lines
+esmo_breast_cancer_patient_guide_korean.pdf,ESMO,ko,70,954,948,1984,43,26,88,147
+kbcs_korean_breast_cancer_guideline_2023.pdf,대한유방암학회,ko,270,1002,895,2002,13,76,306,242
+ncc_breast_cancer_hormone_therapy.pdf,국립암센터,ko,2,818,818,841,13,1,0,0
+ncc_breast_cancer_prevention_guide.pdf,국립암센터,ko,10,982,1034,1831,26,7,22,4
+ncc_breast_cancer_screening_guideline_2015.pdf,국립암센터,ko,114,814,823,1751,25,61,827,343
+nccn_breast_cancer_screening_diagnosis_patient.pdf,NCCN,en,52,388,429,848,21,0,84,33
+nccn_dcis_patient.pdf,NCCN,en,52,354,391,880,23,2,72,29
+nccn_inflammatory_breast_cancer_patient.pdf,NCCN,en,74,408,444,877,34,5,98,41
+nccn_invasive_breast_cancer_patient.pdf,NCCN,en,86,394,438,876,42,5,112,46
+nccn_metastatic_breast_cancer_patient.pdf,NCCN,en,66,437,495,904,25,5,103,29
