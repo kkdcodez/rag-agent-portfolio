@@ -1,0 +1,52 @@
+[tool.poetry]
+name = "rag-agent-portfolio"
+version = "0.1.0"
+description = "유방암 정보 검색 RAG + Multi-Agent 포트폴리오"
+authors = ["jian"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.12"
+
+# --- LangChain 계열 (0.3 세트로 통일) ---
+langchain = "^0.3.27"
+langchain-community = "^0.3.27"
+langchain-core = "^0.3.0"
+langchain-openai = "^0.2.0"
+langchain-anthropic = "^0.2.0"
+langchain-chroma = "^0.1.4"
+langchain-huggingface = "^0.1.2"
+langchain-text-splitters = "^0.3.0"
+
+# --- RAGAS 평가 (0.2 세트, langchain 0.3과 호환) ---
+ragas = "^0.2.10"
+datasets = "^3.0.0"
+
+# --- 임베딩 / 벡터DB ---
+sentence-transformers = "^3.3.0"
+chromadb = "^0.5.0"
+huggingface-hub = "^0.26.0"
+
+# --- PDF 파싱 ---
+pymupdf = "^1.24.0"
+pymupdf4llm = "^0.0.17"
+
+# --- 검색 (5주차) ---
+rank-bm25 = "^0.2.2"
+kiwipiepy = "^0.18.0"
+
+# --- 공통 ---
+pandas = "^2.2.0"
+tiktoken = "^0.8.0"
+nest-asyncio = "^1.6.0"
+python-dotenv = "^1.0.1"
+matplotlib = "^3.11.0"
+
+[tool.poetry.group.dev.dependencies]
+ipykernel = "^6.29.0"
+jupyter = "^1.1.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
