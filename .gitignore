@@ -28,4 +28,4 @@ venv/
 models/
 
 # 맥 시스템 파일
-.DSStore
+.DS_Store
