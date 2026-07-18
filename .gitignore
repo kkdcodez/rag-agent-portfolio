@@ -1,21 +1,29 @@
-# 환경변수
+# 환경 변수 / API 키
 .env
+.env.*
+*.key
 
-# Python
+# 데이터베이스 / 벡터스토어
+*.db
+*.sqlite
+chroma/
+chroma_db/
+*.parquet
+
+# 원본 PDF 데이터 (용량 크면)
+data/
+*.pdf
+
+# 파이썬
 __pycache__/
-*.py[cod]
-*.pyo
-.pytest_cache/
-
-# 가상환경
-venv/
+*.pyc
 .venv/
-env/
+venv/
+.ipynb_checkpoints/
 
-# IDE
-.vscode/
-.idea/
+# 모델 캐시
+.cache/
+models/
 
-# OS
-.DS_Store
-Thumbs.db
+# 맥 시스템 파일
+.DSStore
