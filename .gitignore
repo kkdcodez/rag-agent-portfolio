@@ -11,7 +11,9 @@ chroma_db/
 *.parquet
 
 # 원본 PDF 데이터 (용량 크면)
-data/
+data/raw/
+data/processed/
+data/vector_store/
 *.pdf
 
 # 파이썬
