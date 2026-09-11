@@ -1,14 +1,24 @@
-"""Retrieval — Week 5 최종 구성(R4: Hybrid + Cross-Encoder Rerank).
+"""Retrieval — Week 5 최종 채택안(R4: Hybrid + Cross-Encoder Rerank).
 
-구성: Dense(e5) + BM25(Kiwi 형태소) → RRF 융합 → Cross-Encoder 재정렬 → top-k
+이 파일은 Week 5 노트북의 함수를 그대로 옮긴 것이다.
+각 함수 위 주석에 출처 노트북과 셀 번호를 적었다. 값을 바꿀 때는
+반드시 해당 셀과 대조하고 decision_log에 기록한다.
 
-모델과 인덱스는 최초 호출 시 1회만 로드한다(lazy singleton).
-import 시점에 로드하지 않으므로 config 확인용으로 가볍게 import할 수 있다.
+원본
+- week5_0_preprocess.ipynb  cell 16  청킹 · 메타데이터
+- week5_0_preprocess.ipynb  cell 17  임베딩 · 인덱싱 (prefix 미사용)
+- week5_2_reranking.ipynb   cell 2   상수 (TOP_K=5, FETCH_K=20, RRF_K=60)
+- week5_2_reranking.ipynb   cell 6   BM25 토큰화 · hybrid_search
+- week5_2_reranking.ipynb   cell 8   hybrid_rerank_search
+
+주의
+- 인덱싱 시 "passage: " prefix를 쓰지 않았으므로, 질의에도 prefix를 붙이지 않는다.
+- BM25 토큰화는 내용어만 남긴다. 조사·어미를 포함하면 고빈도 토큰이 신호를
+  희석시켜 표 형태 chunk가 밀려난다 (Week 6에서 실제로 발생).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -19,13 +29,20 @@ from . import config
 @dataclass
 class RetrievedDoc:
     text: str
-    source: str          # 파일명
+    filename: str
     page: object
-    score: float         # rerank score
+    score: float
+    org: Optional[str] = None
+    title: Optional[str] = None
     lang: Optional[str] = None
 
+    @property
+    def source(self) -> str:
+        """하위 호환용 별칭."""
+        return self.filename
+
     def citation(self) -> str:
-        return f"{self.source} p.{self.page}"
+        return f"{self.filename} p.{self.page}"
 
 
 class _Index:
@@ -40,14 +57,16 @@ class _Index:
         from rank_bm25 import BM25Okapi
         from sentence_transformers import CrossEncoder
 
+        # week5_0 cell 17 / week5_2 cell 5 와 동일
         self.emb = HuggingFaceEmbeddings(
             model_name=config.EMBED_MODEL,
-            encode_kwargs={"normalize_embeddings": True},
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True, "batch_size": 16},
         )
         self.vectordb = Chroma(
-            persist_directory=str(config.INDEX_DIR),
-            embedding_function=self.emb,
             collection_name=config.COLLECTION_NAME,
+            embedding_function=self.emb,
+            persist_directory=str(config.INDEX_DIR),
         )
 
         raw = self.vectordb.get(include=["documents", "metadatas"])
@@ -61,10 +80,17 @@ class _Index:
 
         self.kiwi = Kiwi()
         self.bm25 = BM25Okapi([self._tokenize(t) for t in self.texts])
-        self.reranker = CrossEncoder(config.RERANKER_MODEL, max_length=512)
 
+        # week5_2 cell 8 와 동일
+        self.reranker = CrossEncoder(config.RERANKER_MODEL, max_length=512, device="cpu")
+
+    # week5_2 cell 6 — 내용어(명사·동사·S계열·외국어·숫자)만 남긴다
     def _tokenize(self, text: str) -> list[str]:
-        return [t.form.lower() for t in self.kiwi.tokenize(text) if t.form.strip()]
+        return [
+            t.form.lower()
+            for t in self.kiwi.tokenize(text)
+            if t.tag[0] in ("N", "V", "S") or t.tag in ("SL", "SN", "XR")
+        ]
 
     @classmethod
     def get(cls) -> "_Index":
@@ -74,14 +100,17 @@ class _Index:
 
     # --- 개별 검색기 ---
 
+    # week5_2 cell 5 — dense_search. 질의에 prefix를 붙이지 않는다.
     def dense_rank(self, query: str, n: int) -> list[int]:
-        hits = self.vectordb.similarity_search(config.QUERY_PREFIX + query, k=n)
+        hits = self.vectordb.similarity_search(query, k=n)
         return [self.text2idx[d.page_content] for d in hits if d.page_content in self.text2idx]
 
+    # week5_2 cell 6 — bm25_search
     def bm25_rank(self, query: str, n: int) -> list[int]:
         scores = self.bm25.get_scores(self._tokenize(query))
         return list(np.argsort(scores)[::-1][:n])
 
+    # week5_2 cell 6 — hybrid_search (RRF 융합)
     def hybrid_rrf(self, query: str, n_each: int) -> list[int]:
         fused: dict[int, float] = {}
         for ranking in (self.dense_rank(query, n_each), self.bm25_rank(query, n_each)):
@@ -90,12 +119,13 @@ class _Index:
         return sorted(fused, key=fused.get, reverse=True)
 
 
+# week5_2 cell 8 — hybrid_rerank_search
 def retrieve(query: str, top_k: int | None = None) -> list[RetrievedDoc]:
-    """R4 검색. rerank score 내림차순으로 반환."""
+    """Hybrid(dense FETCH_K + bm25 FETCH_K → RRF → top FETCH_K) → rerank → top_k."""
     top_k = top_k or config.TOP_K
     idx = _Index.get()
 
-    cand = idx.hybrid_rrf(query, config.CANDIDATE_EACH)[: config.RERANK_CANDIDATES]
+    cand = idx.hybrid_rrf(query, config.FETCH_K)[: config.FETCH_K]
     if not cand:
         return []
 
@@ -109,17 +139,21 @@ def retrieve(query: str, top_k: int | None = None) -> list[RetrievedDoc]:
         docs.append(
             RetrievedDoc(
                 text=idx.texts[i],
-                source=Path(str(meta.get("source", "?"))).name,
+                filename=meta.get("filename", "?"),
                 page=meta.get("page", "?"),
                 score=float(scores[j]),
+                org=meta.get("org"),
+                title=meta.get("title"),
                 lang=meta.get("language"),
             )
         )
     return docs
 
 
+# week5_0 cell 19 / week5_2 cell 13 — format_context
 def format_context(docs: list[RetrievedDoc]) -> str:
-    """생성 프롬프트에 넣을 context 문자열. 출처를 함께 표기해 인용을 유도한다."""
-    return "\n\n".join(
-        f"[{i}] ({d.citation()})\n{d.text}" for i, d in enumerate(docs, 1)
+    """생성 프롬프트에 넣을 context 문자열. Week 5와 동일한 형식."""
+    return "\n\n---\n\n".join(
+        f"[{i}] 출처: {d.org or '?'} / {d.title or '?'} / p.{d.page}\n{d.text}"
+        for i, d in enumerate(docs, 1)
     )

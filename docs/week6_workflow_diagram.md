@@ -1,4 +1,4 @@
-# Week 6 — Agentic RAG 워크플로우
+# Week 6 — Agentic RAG 워크플로우 (v3)
 
 ## 그래프 구조
 
@@ -7,16 +7,21 @@ flowchart TD
     START([질문]) --> RETRIEVE
 
     RETRIEVE[retrieve<br/>Hybrid + Rerank]
-    GRADE{grade<br/>rerank score}
-    REWRITE[rewrite<br/>질문 재작성]
+    FILTER{filter<br/>rerank score}
+    JUDGE{judge<br/>LLM 판정}
+    REWRITE[rewrite<br/>검색어 재작성]
     GENERATE[generate<br/>답변 생성]
     REFUSE[refuse<br/>고정 문구]
 
-    RETRIEVE --> GRADE
-    GRADE -->|score >= 0.5| GENERATE
-    GRADE -->|score < 0.1| REFUSE
-    GRADE -->|0.1 ~ 0.5<br/>retry < 2| REWRITE
-    GRADE -.->|0.1 ~ 0.5<br/>retry 소진| GENERATE
+    RETRIEVE --> FILTER
+    FILTER -->|score >= 0.5| GENERATE
+    FILTER -->|score < 0.5| JUDGE
+
+    JUDGE -->|answer| GENERATE
+    JUDGE -->|refuse| REFUSE
+    JUDGE -->|rewrite| REWRITE
+    JUDGE -.->|retry 소진| GENERATE
+
     REWRITE --> RETRIEVE
 
     GENERATE --> END([답변])
@@ -27,9 +32,10 @@ flowchart TD
 
 | 노드 | 역할 | LLM 호출 |
 |---|---|---|
-| `retrieve` | Hybrid(BM25+Dense, RRF) → Cross-Encoder Rerank → top-5 | 없음 |
-| `grade` | rerank 최고 점수로 분기 판단 | **없음** |
-| `rewrite` | 검색되기 쉬운 표현으로 질문 재작성 | 1회 |
+| `retrieve` | Hybrid(BM25+Dense, RRF k=60) top-20 → Cross-Encoder Rerank → top-5 | 없음 |
+| `filter` | rerank 최고 점수로 판정자 호출 여부 결정 | **없음** |
+| `judge` | 조각 내용을 읽고 answer / rewrite / refuse 결정 | 1회 |
+| `rewrite` | 판정자가 만든 검색어 사용. 없을 때만 LLM 호출 | 0~1회 |
 | `generate` | context 기반 답변 생성 | 1회 |
 | `refuse` | 질문 언어에 맞춘 고정 거절 문구 | **없음** |
 
@@ -38,82 +44,135 @@ flowchart TD
 
 ## 분기 기준
 
-```python
-def route_after_grade(state):
-    score = state["max_score"]
-    retry = state["retry_count"]
+### filter — 점수는 필터로만 사용
 
-    if score >= 0.5:   return "generate"   # 근거 충분
-    if score <  0.1:   return "refuse"     # 근거 없음
-    if retry <    2:   return "rewrite"    # 판단 보류, 재검색
-    return "generate"                      # 재시도 소진, 있는 근거로 답변
+```python
+def route_after_filter(state):
+    if state["max_score"] >= 0.5:
+        return "generate"     # 근거 충분, LLM 호출 없이 통과
+    return "judge"            # 판정자에게
 ```
 
-**임계값 근거** — `notebooks/week6_0_goldenset_check.ipynb`의 라벨 검증에서 관측한 분포.
+**0.5의 근거** — bge-reranker의 시그모이드 중립점(원본 점수 0).
+42문항 분포에서 0.472와 0.821 사이가 비어 있어 경계가 안정적이다.
 
-| 구간 | score |
+**v1의 0.1 선을 제거했다.** 그 아래로 떨어진 문항이 판정 기회 없이 즉시 거절되어,
+일반 정보가 존재하는 질문(qid 38)이 고정 문구만 받았기 때문이다.
+
+### judge — LLM이 조각 내용을 읽고 판정
+
+판정자가 받는 것
+
+| 항목 | 용도 |
 |---|---|
-| 근거 명확 | 0.92 ~ 0.99 |
-| 부분 관련 | 0.36 ~ 0.43 |
-| 근거 없음 | 0.03 ~ 0.05 |
+| 원 질문 | 판단 기준 |
+| 현재 검색어 | rewrite 이탈 확인 |
+| 질문 언어 | 문구 언어 |
+| 재검색 횟수 / 최대 | rewrite 선택 가능 여부 |
+| 조각 5개 전문 (각 800자) | 답변 가능성 판단 |
+| 조각별 rerank 점수 | 관련도 분포 참고 |
+| 조각별 출처 (문서명·페이지) | 문서 분산, 메타 정보 |
 
-0.5는 bge-reranker의 시그모이드 중립점(원본 점수 0)에 해당한다.
+**받지 않는 것** — 평가셋 라벨(`q_type`, `expected_behavior`).
+실제 서비스에 존재하지 않는 정보이므로 주면 평가 점수만 오르고 재현되지 않는다.
+
+판정 순서를 강제한다. **decision이 마지막**이다.
+
+```
+asked      질문이 요구하는 것 (시점·대상·범위 조건 포함)
+evidence   full | partial | related_only | none
+category   in_scope | out_of_scope
+reason     결론의 근거
+decision   answer | rewrite | refuse
+```
+
+초기 버전에서 결론을 먼저 내고 사유를 사후 생성하는 현상이 관찰되어 순서를 바꿨다.
+
+### 판정 정책
+
+**refuse는 되돌릴 수 없다.** 생성 단계에 "근거 없으면 확인할 수 없다고 답하라"는 규칙이
+있으므로 잘못된 answer는 회복되지만 잘못된 refuse는 회복되지 않는다.
+
+따라서 refuse에는 적극적인 입증을 요구한다.
+
+| decision | 조건 |
+|---|---|
+| **answer** | evidence가 full 또는 partial<br>개인 치료 결정 질문이라도 해당 주제의 일반 원칙이 조각에 있으면 포함<br>재검색 소진 후 refuse 조건이 성립하지 않을 때 |
+| **rewrite** | evidence가 related_only 또는 none **이면서** category가 in_scope<br>재검색 횟수가 최대에 도달하지 않았을 때 |
+| **refuse** | category가 out_of_scope (비용, 기관 평가, 개인 기록, 실시간 정보 등) |
+
+**refuse의 근거가 되지 않는 것** — 지금 조각에 답이 없다 / rerank 점수가 낮다 /
+질문이 요구한 시점의 자료를 찾지 못했다 / 개인 상황에 대한 확정적 판단을 내릴 수 없다
+
+### rewrite / refuse 구분 축
+
+판정자는 검색된 5개 조각만 보므로 "문서 어딘가에 답이 있는가"를 알 수 없다.
+초기 프롬프트가 그것을 묻자 **rewrite가 0회 선택**되고 qid 4가 오거절되었다.
+
+판정자가 실제로 볼 수 있는 축으로 바꿨다.
+
+> 질문이 요구하는 정보의 **종류**가 이 문서 모음이 다루는 종류인가?
+
+조각 5개만 봐도 문서 모음의 성격은 알 수 있으므로 판단이 가능해진다.
 
 ## 안전장치
 
-**재검색이 이전보다 나쁠 경우 이전 결과 유지**
+**재검색이 이전보다 나쁘면 이전 결과 유지**
 
 `retrieve` 노드는 새 검색의 최고 점수가 이전보다 낮으면 이전 `docs`를 그대로 둔다.
 `route_history`에 `kept prev 0.494 > new 0.219` 형태로 기록된다.
 
-Week 5-3 Multi-Query가 정상 검색을 악화시켜 미채택된 사례의 재발을 막기 위한 규칙이다.
+Week 5-3 Multi-Query가 정상 검색을 악화시켜 미채택된 사례의 재발을 막는다.
 
-**재시도 소진 시 거절하지 않음**
+**재시도 소진 시 rewrite를 answer로 대체**
 
-0.1~0.5 구간의 문항은 대부분 `expected_behavior=answer`이므로,
-재검색으로 개선되지 않아도 있는 근거로 답변한다. 과잉 거절을 막는다.
+0.1 선을 제거했으므로 판정자가 계속 rewrite를 고르면 무한 루프가 된다.
+`MAX_RETRY`에 도달하면 rewrite를 answer로 바꾸고 사유에 기록한다.
+
+**판정 JSON 파싱 실패 시 answer로 처리**
+
+파싱 오류가 오거절로 이어지면 안 된다. 실패 사유는 `reason`에 남긴다.
 
 ## State
 
 ```python
 class AgentState(TypedDict):
-    question: str          # 원래 질문 (불변)
-    lang: str              # ko | en — 거절 문구 선택
+    question: str          # 원 질문 (불변)
+    lang: str              # ko | en
     query: str             # 실제 검색어 (rewrite로 변경됨)
     docs: list[RetrievedDoc]
     max_score: float
     retry_count: int
+    judge_calls: list[dict]      # 호출별 decision / evidence / category / reason
     answer: str
-    decision: str          # answer | refuse
+    decision: str                # answer | refuse
     route_history: list[str]     # 경로 기록 → Week 7 Routing Accuracy
     node_latencies: list[dict]   # 노드별 소요 시간
 ```
 
 ## 실행 경로 예시
 
-**qid 1 — 근거 충분 (37문항이 이 경로)**
+**qid 4 — 근거 충분 (35문항이 이 경로, 판정자 미경유)**
 
 ```
-retrieve(score=0.988) → grade(score=0.988, retry=0) → generate
+retrieve(score=0.866) → filter(score=0.866, retry=0) → generate
 ```
 
-**qid 32 — 근거 없음**
+**qid 32 — 범위 밖 (판정자가 즉시 거절)**
 
 ```
-retrieve(score=0.030) → grade(score=0.030, retry=0) → refuse
+retrieve(score=0.030)
+→ filter(score=0.030, retry=0)
+→ judge -> refuse (evidence=none, category=out_of_scope)
+→ refuse
 ```
 
-**qid 4 — 재검색 (5문항이 이 경로)**
+**qid 38 — 점수는 낮으나 일반 정보 존재**
 
 ```
-retrieve(score=0.150)
-→ grade(score=0.150, retry=0)
-→ rewrite → "유방암 1기와 2기의 구분은 어떻게 이루어지나요?"
-→ retrieve(score=0.494)
-→ grade(score=0.494, retry=1)
-→ rewrite → "유방암 1기와 2기의 차별적 특성은 무엇인가요?"
-→ retrieve(kept prev 0.494 > new 0.219)
-→ grade(score=0.494, retry=2)
+retrieve(score=0.027)
+→ filter(score=0.027, retry=0)
+→ judge -> answer (evidence=partial, category=in_scope)
 → generate
 ```
 
@@ -123,13 +182,15 @@ retrieve(score=0.150)
 src/rag/graph/
 ├── __init__.py    run() 노출
 ├── state.py       AgentState 정의
-├── nodes.py       노드 5개 + route_after_grade
+├── nodes.py       노드 6개 + route_after_filter / route_after_judge
 └── graph.py       StateGraph 조립, run() 진입점
 ```
 
 ```python
 from src.rag.graph import run
 
-result = run("유방암 1기와 2기의 차이는 무엇인가요?")
-result.answer, result.decision, result.max_score, result.retry_count, result.route
+r = run("유방암 1기와 2기의 차이는 무엇인가요?")
+r.answer, r.decision, r.max_score, r.retry_count
+r.judged, r.judge_decision, r.judge_evidence, r.judge_category, r.judge_reason
+r.route
 ```

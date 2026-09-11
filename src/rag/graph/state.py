@@ -26,6 +26,9 @@ class AgentState(TypedDict, total=False):
     max_score: float
     retry_count: int
 
+    # --- 판정 기록 (v3에서 추가) ---
+    judge_calls: Annotated[list[dict], append]   # 판정자 호출별 decision/reason
+
     # --- 출력 ---
     answer: str
     decision: Literal["answer", "refuse"]   # 최종 행동
